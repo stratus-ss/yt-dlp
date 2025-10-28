@@ -15,9 +15,23 @@ from ..utils.traversal import traverse_obj
 
 
 class GameDevTVDashboardIE(InfoExtractor):
-    _VALID_URL = r'https?://(?:www\.)?gamedev\.tv/dashboard/courses/(?P<course_id>\d+)(?:/(?P<lecture_id>\d+))?'
+    _VALID_URL = r'https?://(?:www\.)?gamedev\.tv/(?:dashboard/)?courses/(?P<course_id>[\w-]+)(?:/(?P<section_id>[\w-]+))?(?:/(?P<lecture_id>[\w-]+))?'
     _NETRC_MACHINE = 'gamedevtv'
     _TESTS = [{
+        'url': 'https://www.gamedev.tv/courses/blender4-character-creator/community-and-support/7902',
+        'info_dict': {
+            'id': 'blender4-character-creator',
+            'title': 'Blender Character Creator',
+        },
+        'skip': 'Requires authentication',
+    }, {
+        'url': 'https://gamedev.tv/courses/blender-low-poly-characters',
+        'info_dict': {
+            'id': 'blender-low-poly-characters',
+            'title': 'Low Poly Characters in Blender',
+        },
+        'skip': 'Requires authentication',
+    }, {
         'url': 'https://www.gamedev.tv/dashboard/courses/25',
         'info_dict': {
             'id': '25',
@@ -62,7 +76,7 @@ class GameDevTVDashboardIE(InfoExtractor):
     def _perform_login(self, username, password):
         try:
             response = self._download_json(
-                'https://api.gamedev.tv/api/students/login', None, 'Logging in',
+                'https://prod.gamedev.tv/api/students/login', None, 'Logging in',
                 headers={'Content-Type': 'application/json'},
                 data=json.dumps({
                     'email': username,
@@ -89,15 +103,18 @@ class GameDevTVDashboardIE(InfoExtractor):
                 'season_number': ('order', {int_or_none}),
             })
             for lecture in traverse_obj(section, ('lectures', lambda _, v: url_or_none(v['video']['playListUrl']))):
-                if selected_lecture and str(lecture.get('id')) != selected_lecture:
-                    continue
-                display_id = join_nonempty(course_id, section_info.get('season_id'), lecture.get('id'))
+                lecture_id_str = str(lecture.get('id'))
+                if selected_lecture:
+                    lecture_slug = str_or_none(lecture.get('slug'))
+                    if lecture_id_str != selected_lecture and lecture_slug != selected_lecture:
+                        continue
+                display_id = join_nonempty(course_id, section_info.get('season_id'), lecture_id_str)
                 formats, subtitles = self._extract_m3u8_formats_and_subtitles(
                     lecture['video']['playListUrl'], display_id, 'mp4', m3u8_id='hls')
                 yield {
                     **course_info,
                     **section_info,
-                    'id': display_id,  # fallback
+                    'id': display_id,  
                     'display_id': display_id,
                     'formats': formats,
                     'subtitles': subtitles,
@@ -118,9 +135,21 @@ class GameDevTVDashboardIE(InfoExtractor):
                 }
 
     def _real_extract(self, url):
-        course_id, lecture_id = self._match_valid_url(url).group('course_id', 'lecture_id')
+        course_slug, section_id, lecture_id  = self._match_valid_url(url).group('course_id').group('section_id').group('lecture_id')
+
+        selected_lecture = lecture_id or section_id
+
+        if course_slug.isdigit():
+            course_id = course_slug
+        else:
+            webpage = self._download_webpage(url, course_slug)
+
+            course_id = self._search_regex(
+                r'productSaleData[^}]*?id\D+?(\d+)',
+                webpage, 'course id')
+        
         data = self._download_json(
-            f'https://api.gamedev.tv/api/courses/my/{course_id}', course_id,
+            f'https://prod.gamedev.tv/api/courses/my/{course_id}', course_id,
             headers=self._API_HEADERS)['data']
 
         course_info = traverse_obj(data, {
@@ -132,10 +161,10 @@ class GameDevTVDashboardIE(InfoExtractor):
             'thumbnail': ('image', {url_or_none}),
         })
 
-        entries = self._entries(data, course_id, course_info, lecture_id)
-        if lecture_id:
+        entries = self._entries(data, course_slug, course_info, selected_lecture)
+        if selected_lecture:
             lecture = next(entries, None)
             if not lecture:
                 raise ExtractorError('Lecture not found')
             return lecture
-        return self.playlist_result(entries, course_id, **course_info)
+        return self.playlist_result(entries, course_slug, **course_info)
